@@ -6,7 +6,7 @@ from collections import defaultdict
 from cornac.data import GraphModality
 from cornac.models import (
     FM,      # Factorization Machine
-    SoRec,   # Social Recommendation
+    # SoRec,   # Social Recommendation
     PMF,     # Probabilistic Matrix Factorization
     BPR,     # Bayesian Personalized Ranking
     SVD,     # SVD-based collaborative filtering

@@ -44,41 +44,38 @@ def run_pipeline(dataset_type, model_name, output_csv, user_subset_ratio=1.0,
     else:
         raise ValueError("Unknown dataset type")
 
-    # 2) Инициализируем наш Recommender
+
     #    Если модель SoRec -> user_graph передаём,
     #    Иначе можно None (или игнорировать).
-    if model_name.lower() == 'sorec':
-        rec = Recommender(
-            data=data,
-            model=model_name,
-            user_graph=user_graph,
-            user_subset_ratio=user_subset_ratio,
-            min_interactions=min_interactions,
-            use_full_dataset=use_full_dataset,
-            **model_kwargs
-        )
-    else:
-        rec = Recommender(
-            data=data,
-            model=model_name,
-            user_graph=None,  # для PMF, BPR, SVD, NMF, FM соц. граф не нужен
-            user_subset_ratio=user_subset_ratio,
-            min_interactions=min_interactions,
-            use_full_dataset=use_full_dataset,
-            **model_kwargs
-        )
+    # if model_name.lower() == 'sorec':
+    #     rec = Recommender(
+    #         data=data,
+    #         model=model_name,
+    #         user_graph=user_graph,
+    #         user_subset_ratio=user_subset_ratio,
+    #         min_interactions=min_interactions,
+    #         use_full_dataset=use_full_dataset,
+    #         **model_kwargs
+    #     )
+    # else:
+    rec = Recommender(
+        data=data,
+        model=model_name,
+        user_graph=None,  # для PMF, BPR, SVD, NMF, FM соц. граф не нужен
+        user_subset_ratio=user_subset_ratio,
+        min_interactions=min_interactions,
+        use_full_dataset=use_full_dataset,
+        **model_kwargs
+    )
 
-    # 3) Обучаем
     rec.fit()
 
-    # 4) Генерируем рекомендации для train-пользователей
     recs_list = []
     for user in rec.user_ids:
         items = rec.recommend(user, top_n=10)
         recs_str = ",".join(map(str, items))
         recs_list.append({'user': user, 'recommendations': recs_str})
 
-    # 5) Сохраняем в CSV
     recs_df = pd.DataFrame(recs_list)
     recs_df.to_csv(output_csv, index=False)
     logging.info("Saved recommendations => %s", output_csv)
@@ -90,11 +87,11 @@ if __name__ == "__main__":
         #     'dataset_type': 'filmtrust',
         #     'model_name': 'FM',
         #     'output_csv': 'filmtrust_fm.csv',
-        #     'user_subset_ratio': 0.001,     # 50% пользователей
-        #     'use_full_dataset': False,   # последнее взаимодействие в test
+        #     'user_subset_ratio': 0.001,
+        #     'use_full_dataset': False,
         #     'min_interactions': 2,
         #     'seed': 42,
-        #     'k2': 3,                    # параметр FM
+        #     'k2': 3,
         #     'max_iter': 3
         # },
         {
