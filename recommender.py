@@ -1,179 +1,220 @@
-from cornac.data import GraphModality, TextModality
-from cornac.data.text import BaseTokenizer
-
-
-
-from cornac.models import FM, SoRec, CTR
-from cornac.metrics import Precision, Recall, NDCG
+import logging
 import numpy as np
+from collections import defaultdict
+
+# Подключаем нужные модели
+from cornac.data import GraphModality
+from cornac.models import (
+    FM,      # Factorization Machine
+    SoRec,   # Social Recommendation
+    PMF,     # Probabilistic Matrix Factorization
+    BPR,     # Bayesian Personalized Ranking
+    SVD,     # SVD-based collaborative filtering
+    NMF      # Non-negative Matrix Factorization
+)
+
 
 class Recommender:
-    def __init__(self, train_data, model=None, user_graph=None, item_text=None, **model_kwargs):
+    def __init__(
+        self,
+        data,
+        model='FM',
+        user_graph=None,
+        user_subset_ratio=1.0,
+        min_interactions=2,
+        use_full_dataset=False,
+        seed=42,
+        **model_kwargs
+    ):
         """
-        train_data: list of (user, item, rating) tuples for training.
-        model: either a string name of a Cornac model or an instantiated model object.
-        user_graph: list of (user, user) trust pairs or Cornac GraphModality for social context.
-        item_text: dict or list of (item, text) for item descriptions, or Cornac TextModality.
-        model_kwargs: additional keyword args to pass when instantiating the model (if model is a name).
+        Параметры:
+          data: List[(user, item, rating, возможно timestamp)],
+                все взаимодействия (explicit), например из MovieLens/FilmTrust.
+          model: Строка с названием модели, одно из:
+                 ['fm', 'sorec', 'pmf', 'bpr', 'svd', 'nmf'] (регистр не важен).
+          user_graph: Если используем SoRec, можно передать список ребер [(u,v,1), ...].
+          user_subset_ratio: какую долю пользователей брать [0..1].
+          min_interactions: минимальное число взаимодействий, чтобы пользователь попал в выборку.
+          use_full_dataset: если True — всё в train, нет test.
+          seed: для воспроизводимости random.
+          **model_kwargs: доп. параметры, передаваемые в выбранную модель.
         """
-        self.train_data = train_data
 
-        # Set up user and item ID mappings for consistent indexing
-        self.user_ids = sorted({u for u, _, _ in train_data})
-        self.item_ids = sorted({i for _, i, _ in train_data})
+        self.model_name = model
+        self.user_graph = None
+        np.random.seed(seed)
+
+        # 1) Группируем взаимодействия по пользователям
+        ratings_by_user = defaultdict(list)
+        for row in data:
+            user = row[0]
+            item = row[1]
+            rating = row[2]
+            # Если есть 4-й элемент (timestamp), захватим его
+            timestamp = row[3] if len(row) > 3 else None
+            ratings_by_user[user].append((item, rating, timestamp))
+
+        # 2) Фильтруем пользователей с достаточным кол-вом интеракций
+        filtered_users = []
+        for u, interactions in ratings_by_user.items():
+            if len(interactions) >= min_interactions:
+                filtered_users.append(u)
+
+        # 3) Даунсэмплинг пользователей (user_subset_ratio)
+        if user_subset_ratio < 1.0:
+            subset_size = int(len(filtered_users) * user_subset_ratio)
+            selected_users = set(np.random.choice(filtered_users, size=subset_size, replace=False))
+        else:
+            selected_users = set(filtered_users)
+
+        self.train_data = []
+        self.test_data = []
+
+        # 4) Для каждого пользователя:
+        #    - Сортируем взаимодействия по timestamp (если есть),
+        #    - Если use_full_dataset=False, последнее уходит в test, остальные в train,
+        #      иначе всё в train
+        for u in selected_users:
+            items = ratings_by_user[u]
+            # Если есть timestamp, сортируем
+            if items[0][2] is not None:
+                items = sorted(items, key=lambda x: x[2])  # сортируем по времени
+
+            if use_full_dataset:
+                for (itm, r, ts) in items:
+                    self.train_data.append((u, itm, r))
+            else:
+                # Последняя запись в test, остальные в train
+                if len(items) == 1:
+                    self.train_data.append((u, items[0][0], items[0][1]))
+                else:
+                    *train_part, last_inter = items
+                    for (itm, r, ts) in train_part:
+                        self.train_data.append((u, itm, r))
+                    self.test_data.append((u, last_inter[0], last_inter[1]))
+
+        logging.info(
+            "Recommender: выбрано %d пользователей, train=%d, test=%d",
+            len(selected_users), len(self.train_data), len(self.test_data)
+        )
+
+        # 5) Если SoRec — подключаем social graph
+        #    (для других моделей user_graph игнорируется)
+        # if user_graph is not None and model.lower() == 'sorec':
+        #     self.user_graph = GraphModality(data=user_graph, symmetric=True)
+
+        # 6) Создаём нужную модель
+        model_lower = model.lower()
+        if model_lower == 'fm':
+            self.model = FM(seed=seed, **model_kwargs)
+        elif model_lower == 'sorec':
+            self.model = SoRec(seed=seed, **model_kwargs)
+        elif model_lower == 'pmf':
+            self.model = PMF(seed=seed, **model_kwargs)
+        elif model_lower == 'bpr':
+            self.model = BPR(seed=seed, **model_kwargs)
+        elif model_lower == 'svd':
+            self.model = SVD(seed=seed, **model_kwargs)
+        elif model_lower == 'nmf':
+            self.model = NMF(seed=seed, **model_kwargs)
+        else:
+            raise ValueError(f"Неизвестная модель: {model}")
+
+        # 7) Определяем ID-шники юзеров и айтемов (только из train, чтобы сошлось с моделью Cornac)
+        self.user_ids = sorted({u for u, _, _ in self.train_data})
+        self.item_ids = sorted({i for _, i, _ in self.train_data})
         self.user_to_index = {u: idx for idx, u in enumerate(self.user_ids)}
         self.item_to_index = {i: idx for idx, i in enumerate(self.item_ids)}
 
-        # Prepare Cornac modalities for user graph and item text if provided
-        self.user_graph = None
-        if user_graph is not None:
-            # If raw list of edges provided, create GraphModality
-            if isinstance(user_graph, GraphModality):
-                self.user_graph = user_graph
-            else:
-                self.user_graph = GraphModality(data=user_graph, symmetric=True)
+        # 8) Запомним, какие items юзер видел в train (чтобы не рекомендовать их повторно)
+        self.train_items_by_user = defaultdict(set)
+        for u, i, r in self.train_data:
+            self.train_items_by_user[u].add(i)
 
-        self.item_text = None
-        if item_text is not None:
-            if isinstance(item_text, TextModality):
-                self.item_text = item_text
-            else:
-                # If item_text is a dict or list of (id, text), convert to TextModality
-                if isinstance(item_text, dict):
-                    ids, docs = zip(*item_text.items())
-                else:  # list of tuples
-                    ids, docs = zip(*item_text)
-                # Ensure item IDs used in text are in training items
-                ids = list(ids)
-                docs = list(docs)
-                # Initialize TextModality (use basic tokenizer and limit vocabulary size for speed)
-
-                # Создание токенизатора
-                tokenizer = BaseTokenizer()
-                self.item_text = TextModality(corpus=docs, ids=ids, tokenizer=tokenizer, max_doc_freq=1.0)
-
-        # Instantiate the model if a name is given
-        if isinstance(model, str):
-            model_name = model.lower()
-            if model_name == 'fm':
-                # Factorization Machine model (we use default or provided k2 factors)
-                self.model = FM(**model_kwargs)
-            elif model_name == 'sorec':
-                self.model = SoRec(**model_kwargs)
-            elif model_name == 'ctr':
-                self.model = CTR(**model_kwargs)
-            else:
-                raise ValueError(f"Unknown model name: {model}")
-        else:
-            # If an instance of a Cornac model is provided
-            self.model = model
-
-        # Store training user->items mapping for filtering in recommendations
-        self.train_items_by_user = {}
-        for u, i, r in train_data:
-            self.train_items_by_user.setdefault(u, set()).add(i)
 
     def fit(self):
-        """Train the model on the training data (leveraging any provided side information)."""
-        # Cornac models expect data as an iterable of (user, item, rating)
-        # We can train directly if modalities were set at model init; otherwise, we use an evaluation method.
-
-        # If we have side info, use Cornac's RatioSplit to prepare data and then fit through Cornac's Experiment or directly.
+        """Тренируем выбранную модель. Если есть test, считаем метрики."""
         from cornac.eval_methods import RatioSplit
-        ratio_split = RatioSplit(data=self.train_data, test_size=0.0, exclude_unknowns=False,
-                                 user_graph=self.user_graph, item_text=self.item_text, seed=0)
-        train_set = ratio_split.train_set
 
-        # Fit the model on the training set
+        # Создаём RatioSplit с test_size=0.0, т.к. Cornac мы передаём только train
+        ratio_split = RatioSplit(
+            data=self.train_data,
+            test_size=0.0,
+            user_graph=self.user_graph,
+            exclude_unknowns=False,
+            seed=0
+        )
+        train_set = ratio_split.train_set
         self.model.fit(train_set)
-        return self
+
+        # Если есть тест, логируем метрики
+        if len(self.test_data) > 0:
+            p, r, ndcg = self.evaluate(self.test_data, k=10)
+            logging.info(
+                "%s Test => P@10=%.4f, R@10=%.4f, NDCG@10=%.4f",
+                self.model_name.upper(), p, r, ndcg
+            )
+
 
     def recommend(self, user_id, top_n=10):
-        """Generate top-N recommendations for a given user."""
+        """Формируем top-N для данного user_id."""
         if user_id not in self.user_to_index:
-            return []  # Unknown user
-        uidx = self.user_to_index[user_id]
-        # Get score predictions for all items for this user
-        scores = self.model.score(uidx)  # returns scores for all items
+            return []
+        import numpy as np
+        u_idx = self.user_to_index[user_id]
+        scores = self.model.score(u_idx)  # вектор скоров для каждого item
         scores = np.array(scores)
-        # Exclude items the user has already interacted with in training
-        if user_id in self.train_items_by_user:
-            seen_items = self.train_items_by_user[user_id]
-            seen_indices = [self.item_to_index[i] for i in seen_items if i in self.item_to_index]
-            scores[seen_indices] = -np.inf  # lower the score to exclude seen items
-        # Get indices of top N scores
+
+        # Убираем items, которые юзер видел
+        seen = self.train_items_by_user[user_id]
+        for it in seen:
+            if it in self.item_to_index:
+                idx = self.item_to_index[it]
+                scores[idx] = -np.inf
+
         top_indices = np.argpartition(scores, -top_n)[-top_n:]
         top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-        # Map back to item IDs
-        top_items = [self.item_ids[idx] for idx in top_indices]
+        top_items = [self.item_ids[i] for i in top_indices]
         return top_items
+
 
     def evaluate(self, test_data, k=10, rating_threshold=2.5):
         """
-        Compute Precision@K, Recall@K, and NDCG@K on the provided test data.
-        Only items with rating >= rating_threshold are considered "relevant" for evaluation.
+        Считаем Precision@K, Recall@K, NDCG@K на test_data.
+        Предполагается, что test_data = [(user, item, rating), ...].
         """
-        # Build ground-truth relevance sets from test data
-        true_items_by_user = {}
+        import numpy as np
+        true_items_by_user = defaultdict(set)
         for u, i, r in test_data:
             if r >= rating_threshold:
-                true_items_by_user.setdefault(u, set()).add(i)
+                true_items_by_user[u].add(i)
 
-        # Compute metrics
-        prec_list = []
-        rec_list = []
-        ndcg_list = []
-        for user, true_items in true_items_by_user.items():
-            if not true_items:
-                continue  # skip users with no relevant items
-            # Get top-K recommendations for the user
-            top_k = self.recommend(user, top_n=k)
-            if not top_k:
+        prec_list, rec_list, ndcg_list = [], [], []
+
+        for user, relevant_items in true_items_by_user.items():
+            if user not in self.user_to_index:
                 continue
-            # Precision@K: fraction of recommended items that are relevant
-            hits = sum(1 for item in top_k if item in true_items)
+            top_k = self.recommend(user, top_n=k)
+            hits = sum(1 for it in top_k if it in relevant_items)
+
             prec = hits / k
+            rec = hits / len(relevant_items)
             prec_list.append(prec)
-            # Recall@K: fraction of relevant items that are recommended
-            rec = hits / len(true_items)
             rec_list.append(rec)
-            # NDCG@K: discounted gain of recommended hits
-            dcg = 0.0
-            idcg = 0.0
-            for rank, item in enumerate(top_k, start=1):
-                rel = 1.0 if item in true_items else 0.0
+
+            # NDCG
+            dcg, idcg = 0.0, 0.0
+            for rank, it in enumerate(top_k, start=1):
+                rel = 1.0 if it in relevant_items else 0.0
                 dcg += rel / np.log2(rank + 1)
-            # Calculate ideal DCG (IDCG) for this user (i.e., all top K are relevant if possible)
-            sorted_relevances = sorted([1.0] * len(true_items) + [0.0] * (k - len(true_items)), reverse=True)
-            for rank, rel in enumerate(sorted_relevances, start=1):
+            # Ideal DCG
+            sorted_relevances = [1.0]*len(relevant_items) + [0.0]*(k - len(relevant_items))
+            for rank, rel in enumerate(sorted_relevances[:k], start=1):
                 idcg += rel / np.log2(rank + 1)
-            ndcg = dcg / idcg if idcg > 0 else 0.0
+            ndcg = dcg/idcg if idcg > 0 else 0.0
             ndcg_list.append(ndcg)
 
-        # Average metrics over all users
-        precision_at_k = np.mean(prec_list) if prec_list else 0.0
-        recall_at_k = np.mean(rec_list) if rec_list else 0.0
-        ndcg_at_k = np.mean(ndcg_list) if ndcg_list else 0.0
-        return precision_at_k, recall_at_k, ndcg_at_k
-
-
-def generate_recommendations(train_data, model_name, top_n=5, **model_kwargs):
-    """
-    Функция принимает:
-      - train_data: список кортежей (user, item, rating)
-      - model_name: строка с названием модели (например, 'FM', 'SoRec', 'CTR')
-      - top_n: число рекомендуемых айтемов для каждого пользователя (по умолчанию 5)
-      - model_kwargs: дополнительные параметры для модели Cornac
-    Функция обучает модель и возвращает словарь, где ключ – идентификатор пользователя,
-    а значение – список рекомендованных айтемов.
-    """
-    # Инициализируем и обучаем модель с использованием CornacRecommender
-    recommender = Recommender(train_data, model=model_name, **model_kwargs)
-    recommender.fit()
-
-    recommendations = {}
-    # Проходим по всем пользователям, имеющим данные в тренировочном наборе
-    for user in recommender.user_ids:
-        recommendations[user] = recommender.recommend(user, top_n=top_n)
-
-    return recommendations
+        p = np.mean(prec_list) if prec_list else 0.0
+        r = np.mean(rec_list) if rec_list else 0.0
+        n = np.mean(ndcg_list) if ndcg_list else 0.0
+        return p, r, n
