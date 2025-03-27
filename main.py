@@ -4,10 +4,6 @@ import logging
 
 from recommender import UniversalContextualRecommender
 
-# Предполагается, что класс UniversalContextualRecommender уже реализован.
-# Например, если он находится в модуле my_recommender, импортируйте его:
-
-
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +32,7 @@ def load_data(directory: str):
     df_hours = pd.read_csv(files["chefmozhours4"])
     df_parking = pd.read_csv(files["chefmozparking"])
 
-    # Для geoplaces2 задаем явную кодировку
+    # Для geoplaces2 задаём явную кодировку
     try:
         df_geoplaces = pd.read_csv(files["geoplaces2"], encoding="utf-8")
     except UnicodeDecodeError:
@@ -66,9 +62,9 @@ def load_data(directory: str):
 def merge_data(directory: str) -> pd.DataFrame:
     """
     Объединяет данные:
-      - Используется rating_final.csv как базовая таблица (User-Item-Rating).
-      - По ключу placeID объединяются файлы с данными по ресторанам.
-      - По ключу userID объединяются файлы с данными по потребителям.
+      - rating_final.csv используется как базовая таблица (User-Item-Rating).
+      - По ключу placeID объединяются файлы с информацией о ресторанах.
+      - По ключу userID объединяются файлы с информацией о пользователях.
     """
     (df_accepts, df_cuisine, df_hours, df_parking,
      df_geoplaces, df_rating, df_usercuisine, df_userpayment, df_userprofile) = load_data(directory)
@@ -81,7 +77,7 @@ def merge_data(directory: str) -> pd.DataFrame:
     df = df.merge(df_parking, on="placeID", how="left")
     df = df.merge(df_accepts, on="placeID", how="left")
 
-    # Объединяем информацию о потребителях
+    # Объединяем информацию о пользователях
     df = df.merge(df_userprofile, on="userID", how="left")
     df = df.merge(df_usercuisine, on="userID", how="left")
     df = df.merge(df_userpayment, on="userID", how="left")
@@ -107,48 +103,62 @@ def save_recommendations_to_csv(recommendations: dict, output_file: str):
 
 
 def main():
-    # Задайте путь к директории с данными
     data_directory = "restaurant+consumer+data"
     df = merge_data(data_directory)
 
-    # Определяем контекстные признаки: исключаем ключевые колонки, отвечающие за идентификаторы и основную оценку.
-    # Здесь используем userID, placeID и rating (а также food_rating, service_rating если есть) как основные.
+    # Определяем контекстные признаки: исключаем основные колонки
     exclude_cols = ['userID', 'placeID', 'rating', 'food_rating', 'service_rating']
     context_cols = [col for col in df.columns if col not in exclude_cols]
     logger.info("Контекстные признаки: %s", context_cols)
 
-    # ------------------- CAMF модель -------------------
-    logger.info("Запуск CAMF модели")
-    recommender_camf = UniversalContextualRecommender(
+    # ------------------- Модель LightFM -------------------
+    logger.info("Запуск модели LightFM")
+    recommender_lightfm = UniversalContextualRecommender(
         dataset=df,
-        model_name='camf',
-        user_col='userID',  # идентификатор пользователя
-        item_col='placeID',  # идентификатор ресторана
-        rating_col='rating',  # основная оценка
-        context_cols=context_cols,
-        n_factors=10,
-        learning_rate=0.01,
-        reg=0.02,
-        epochs=10
-    )
-    recommender_camf.fit()
-    camf_recs = recommender_camf.predict(default_context=None)
-    save_recommendations_to_csv(camf_recs, "camf_restaurant_recommendations.csv")
-
-    # ------------------- CSLIM модель -------------------
-    logger.info("Запуск CSLIM модели")
-    recommender_cslim = UniversalContextualRecommender(
-        dataset=df,
-        model_name='cslim',
+        model_name='lightfm',
         user_col='userID',
         item_col='placeID',
         rating_col='rating',
-        context_cols=context_cols,  # для CSLIM контекстные признаки не используются, но передаются для согласованности
-        use_ratings=True
+        context_cols=context_cols,
+        epochs=10,
+        learning_rate=0.05
     )
-    recommender_cslim.fit()
-    cslim_recs = recommender_cslim.predict(default_context=None)
-    save_recommendations_to_csv(cslim_recs, "cslim_restaurant_recommendations.csv")
+    recommender_lightfm.fit()
+    lightfm_recs = recommender_lightfm.predict()
+    save_recommendations_to_csv(lightfm_recs, "lightfm_restaurant_recommendations.csv")
+
+    # ------------------- Модель Implicit ALS -------------------
+    # logger.info("Запуск модели Implicit ALS")
+    # recommender_implicit = UniversalContextualRecommender(
+    #     dataset=df,
+    #     model_name='implicit_als',
+    #     user_col='userID',
+    #     item_col='placeID',
+    #     rating_col='rating',
+    #     context_cols=context_cols,
+    #     factors=50,
+    #     iterations=10
+    # )
+    # recommender_implicit.fit()
+    # implicit_recs = recommender_implicit.predict()
+    # save_recommendations_to_csv(implicit_recs, "implicit_als_restaurant_recommendations.csv")
+
+    # ------------------- Модель Surprise SVD -------------------
+    logger.info("Запуск модели Surprise SVD")
+    recommender_surprise = UniversalContextualRecommender(
+        dataset=df,
+        model_name='surprise_svd',
+        user_col='userID',
+        item_col='placeID',
+        rating_col='rating',
+        context_cols=context_cols,
+        epochs=20,
+        lr_all=0.005,
+        reg_all=0.02
+    )
+    recommender_surprise.fit()
+    surprise_recs = recommender_surprise.predict()
+    save_recommendations_to_csv(surprise_recs, "surprise_svd_restaurant_recommendations.csv")
 
 
 if __name__ == '__main__':
