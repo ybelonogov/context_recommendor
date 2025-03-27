@@ -119,7 +119,7 @@ class UniversalContextualRecommender:
                  rating_col: str = 'rating', context_cols: list = None, **model_params):
         """
         :param dataset: DataFrame с данными.
-        :param model_name: название модели ('lightfm', 'implicit_als', 'surprise_svd').
+        :param model_name: название модели ('lightfm', 'surprise_svd').
         :param user_col: название столбца с идентификаторами пользователей.
         :param item_col: название столбца с идентификаторами объектов.
         :param rating_col: название столбца с оценками.
