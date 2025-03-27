@@ -283,38 +283,3 @@ class CSLIMModel:
         return recommendations
 
 
-# Пример использования:
-if __name__ == "__main__":
-    # Пример датасета с контекстными признаками
-    data = {
-        'user_id': ['u1', 'u1', 'u2', 'u2', 'u3', 'u3', 'u4'],
-        'item_id': ['i1', 'i2', 'i2', 'i3', 'i1', 'i3', 'i2'],
-        'rating': [5, 3, 4, 2, 1, 5, 4],
-        'gender': ['M', 'M', 'F', 'F', 'M', 'M', 'F'],  # контекст: пол
-        'age': [25, 25, 30, 30, 22, 22, 28]  # контекст: возраст
-    }
-    df = pd.DataFrame(data)
-
-    logger.info("=== Запуск CAMF модели ===")
-    camf_recommender = UniversalContextualRecommender(df, model_name='camf',
-                                                      user_col='user_id', item_col='item_id',
-                                                      rating_col='rating',
-                                                      context_cols=['gender', 'age'],
-                                                      n_factors=5, learning_rate=0.01, reg=0.02, epochs=15)
-    camf_recommender.fit()
-    default_context = {'gender': 'M', 'age': 25}
-    camf_recs = camf_recommender.predict(default_context=default_context)
-    logger.info("Рекомендации (CAMF) для пользователей:")
-    for user, items in camf_recs.items():
-        logger.info("Пользователь %s: %s", user, items)
-
-    logger.info("=== Запуск CSLIM модели ===")
-    cslim_recommender = UniversalContextualRecommender(df, model_name='cslim',
-                                                       user_col='user_id', item_col='item_id',
-                                                       rating_col='rating', context_cols=['gender', 'age'],
-                                                       use_ratings=True)
-    cslim_recommender.fit()
-    cslim_recs = cslim_recommender.predict()
-    logger.info("Рекомендации (CSLIM) для пользователей:")
-    for user, items in cslim_recs.items():
-        logger.info("Пользователь %s: %s", user, items)
