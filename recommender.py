@@ -93,19 +93,6 @@ class UniversalContextualRecommender:
         logger.info("Предсказание рекомендаций завершено.")
         return recs
 
-    def pre_filter(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        """
-        Пример пред-фильтрации: можно убрать объекты по сезонным или другим условиям.
-        """
-        # Здесь можно реализовать логику пред-фильтрации.
-        return dataset
-
-    def post_filter(self, recommendations: dict) -> dict:
-        """
-        Пример пост-фильтрации: можно до финального вывода дополнительно отфильтровать рекомендации.
-        """
-        # Здесь можно реализовать логику пост-фильтрации.
-        return recommendations
 
 
 # Реализация модели CAMF с использованием SGD
