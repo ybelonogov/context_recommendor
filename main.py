@@ -127,21 +127,7 @@ def main():
     lightfm_recs = recommender_lightfm.predict()
     save_recommendations_to_csv(lightfm_recs, "lightfm_restaurant_recommendations.csv")
 
-    # ------------------- Модель Implicit ALS -------------------
-    # logger.info("Запуск модели Implicit ALS")
-    # recommender_implicit = UniversalContextualRecommender(
-    #     dataset=df,
-    #     model_name='implicit_als',
-    #     user_col='userID',
-    #     item_col='placeID',
-    #     rating_col='rating',
-    #     context_cols=context_cols,
-    #     factors=50,
-    #     iterations=10
-    # )
-    # recommender_implicit.fit()
-    # implicit_recs = recommender_implicit.predict()
-    # save_recommendations_to_csv(implicit_recs, "implicit_als_restaurant_recommendations.csv")
+
 
     # ------------------- Модель Surprise SVD -------------------
     logger.info("Запуск модели Surprise SVD")
