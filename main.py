@@ -135,6 +135,7 @@ def main():
     camf_recs = recommender_camf.predict(default_context=None)
     save_recommendations_to_csv(camf_recs, "camf_restaurant_recommendations.csv")
 
+
     # ------------------- CSLIM модель -------------------
     logger.info("Запуск CSLIM модели")
     recommender_cslim = UniversalContextualRecommender(
