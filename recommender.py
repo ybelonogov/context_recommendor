@@ -1,220 +1,320 @@
-import logging
 import numpy as np
+import pandas as pd
+import logging
 from collections import defaultdict
+from numpy.linalg import norm
+import random
 
-# Подключаем нужные модели
-from cornac.data import GraphModality
-from cornac.models import (
-    FM,      # Factorization Machine
-    # SoRec,   # Social Recommendation
-    PMF,     # Probabilistic Matrix Factorization
-    BPR,     # Bayesian Personalized Ranking
-    SVD,     # SVD-based collaborative filtering
-    NMF      # Non-negative Matrix Factorization
-)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+logger = logging.getLogger("UniversalContextualRecommender")
 
 
-class Recommender:
-    def __init__(
-        self,
-        data,
-        model='FM',
-        user_graph=None,
-        user_subset_ratio=1.0,
-        min_interactions=2,
-        use_full_dataset=False,
-        seed=42,
-        **model_kwargs
-    ):
+# Универсальный класс контекстных рекомендаций
+class UniversalContextualRecommender:
+    def __init__(self, dataset: pd.DataFrame, model_name: str,
+                 user_col: str = 'user_id', item_col: str = 'item_id',
+                 rating_col: str = 'rating', context_cols: list = None, **model_params):
         """
-        Параметры:
-          data: List[(user, item, rating, возможно timestamp)],
-                все взаимодействия (explicit), например из MovieLens/FilmTrust.
-          model: Строка с названием модели, одно из:
-                 ['fm', 'sorec', 'pmf', 'bpr', 'svd', 'nmf'] (регистр не важен).
-          user_graph: Если используем SoRec, можно передать список ребер [(u,v,1), ...].
-          user_subset_ratio: какую долю пользователей брать [0..1].
-          min_interactions: минимальное число взаимодействий, чтобы пользователь попал в выборку.
-          use_full_dataset: если True — всё в train, нет test.
-          seed: для воспроизводимости random.
-          **model_kwargs: доп. параметры, передаваемые в выбранную модель.
+        Инициализация рекомендательной системы.
+
+        :param dataset: DataFrame с данными об интеракциях и контекстными фичами.
+        :param model_name: название модели для рекомендаций (например, 'camf', 'cslim').
+        :param user_col: название столбца с идентификаторами пользователей.
+        :param item_col: название столбца с идентификаторами объектов.
+        :param rating_col: название столбца с оценками или степенью взаимодействия.
+        :param context_cols: список столбцов с контекстной информацией (например, пол, возраст, жанр).
+        :param model_params: дополнительные параметры для модели.
         """
+        self.dataset = dataset.copy()
+        self.model_name = model_name.lower()
+        self.user_col = user_col
+        self.item_col = item_col
+        self.rating_col = rating_col
+        self.context_cols = context_cols if context_cols is not None else []
+        self.model_params = model_params
+        self.model = None
 
-        self.model_name = model
-        self.user_graph = None
-        np.random.seed(seed)
+        self._init_model()
 
-        # 1) Группируем взаимодействия по пользователям
-        ratings_by_user = defaultdict(list)
-        for row in data:
-            user = row[0]
-            item = row[1]
-            rating = row[2]
-            # Если есть 4-й элемент (timestamp), захватим его
-            timestamp = row[3] if len(row) > 3 else None
-            ratings_by_user[user].append((item, rating, timestamp))
-
-        # 2) Фильтруем пользователей с достаточным кол-вом интеракций
-        filtered_users = []
-        for u, interactions in ratings_by_user.items():
-            if len(interactions) >= min_interactions:
-                filtered_users.append(u)
-
-        # 3) Даунсэмплинг пользователей (user_subset_ratio)
-        if user_subset_ratio < 1.0:
-            subset_size = int(len(filtered_users) * user_subset_ratio)
-            selected_users = set(np.random.choice(filtered_users, size=subset_size, replace=False))
+    def _init_model(self):
+        """
+        Выбор и инициализация модели на основе переданного названия.
+        """
+        logger.info("Инициализация модели '%s'", self.model_name)
+        if self.model_name == 'camf':
+            self.model = CAMFModel(self.dataset, self.user_col, self.item_col,
+                                   self.rating_col, self.context_cols, **self.model_params)
+        elif self.model_name == 'cslim':
+            self.model = CSLIMModel(self.dataset, self.user_col, self.item_col,
+                                    self.rating_col, self.context_cols, **self.model_params)
+        elif self.model_name in ['vbpr', 'vmf', 'amr', 'casualrec', 'dmrl', 'ctr', 'hft',
+                                 'cdl', 'convmf', 'cdr', 'cvaecf', 'cvae', 'hrdr', 'lightgbm',
+                                 'xgboost', 'deepfm']:
+            logger.error("Модель %s пока не реализована.", self.model_name)
+            raise NotImplementedError(
+                f"Модель {self.model_name} пока не реализована. Реализуйте или подключите её код.")
         else:
-            selected_users = set(filtered_users)
-
-        self.train_data = []
-        self.test_data = []
-
-        # 4) Для каждого пользователя:
-        #    - Сортируем взаимодействия по timestamp (если есть),
-        #    - Если use_full_dataset=False, последнее уходит в test, остальные в train,
-        #      иначе всё в train
-        for u in selected_users:
-            items = ratings_by_user[u]
-            # Если есть timestamp, сортируем
-            if items[0][2] is not None:
-                items = sorted(items, key=lambda x: x[2])  # сортируем по времени
-
-            if use_full_dataset:
-                for (itm, r, ts) in items:
-                    self.train_data.append((u, itm, r))
-            else:
-                # Последняя запись в test, остальные в train
-                if len(items) == 1:
-                    self.train_data.append((u, items[0][0], items[0][1]))
-                else:
-                    *train_part, last_inter = items
-                    for (itm, r, ts) in train_part:
-                        self.train_data.append((u, itm, r))
-                    self.test_data.append((u, last_inter[0], last_inter[1]))
-
-        logging.info(
-            "Recommender: выбрано %d пользователей, train=%d, test=%d",
-            len(selected_users), len(self.train_data), len(self.test_data)
-        )
-
-        # 5) Если SoRec — подключаем social graph
-        #    (для других моделей user_graph игнорируется)
-        # if user_graph is not None and model.lower() == 'sorec':
-        #     self.user_graph = GraphModality(data=user_graph, symmetric=True)
-
-        # 6) Создаём нужную модель
-        model_lower = model.lower()
-        if model_lower == 'fm':
-            self.model = FM(seed=seed, **model_kwargs)
-        elif model_lower == 'sorec':
-            self.model = SoRec(seed=seed, **model_kwargs)
-        elif model_lower == 'pmf':
-            self.model = PMF(seed=seed, **model_kwargs)
-        elif model_lower == 'bpr':
-            self.model = BPR(seed=seed, **model_kwargs)
-        elif model_lower == 'svd':
-            self.model = SVD(seed=seed, **model_kwargs)
-        elif model_lower == 'nmf':
-            self.model = NMF(seed=seed, **model_kwargs)
-        else:
-            raise ValueError(f"Неизвестная модель: {model}")
-
-        # 7) Определяем ID-шники юзеров и айтемов (только из train, чтобы сошлось с моделью Cornac)
-        self.user_ids = sorted({u for u, _, _ in self.train_data})
-        self.item_ids = sorted({i for _, i, _ in self.train_data})
-        self.user_to_index = {u: idx for idx, u in enumerate(self.user_ids)}
-        self.item_to_index = {i: idx for idx, i in enumerate(self.item_ids)}
-
-        # 8) Запомним, какие items юзер видел в train (чтобы не рекомендовать их повторно)
-        self.train_items_by_user = defaultdict(set)
-        for u, i, r in self.train_data:
-            self.train_items_by_user[u].add(i)
-
+            logger.error("Неизвестное название модели: %s", self.model_name)
+            raise ValueError(f"Неизвестное название модели: {self.model_name}")
 
     def fit(self):
-        """Тренируем выбранную модель. Если есть test, считаем метрики."""
-        from cornac.eval_methods import RatioSplit
-
-        # Создаём RatioSplit с test_size=0.0, т.к. Cornac мы передаём только train
-        ratio_split = RatioSplit(
-            data=self.train_data,
-            test_size=0.0,
-            user_graph=self.user_graph,
-            exclude_unknowns=False,
-            seed=0
-        )
-        train_set = ratio_split.train_set
-        self.model.fit(train_set)
-
-        # Если есть тест, логируем метрики
-        if len(self.test_data) > 0:
-            p, r, ndcg = self.evaluate(self.test_data, k=10)
-            logging.info(
-                "%s Test => P@10=%.4f, R@10=%.4f, NDCG@10=%.4f",
-                self.model_name.upper(), p, r, ndcg
-            )
-
-
-    def recommend(self, user_id, top_n=10):
-        """Формируем top-N для данного user_id."""
-        if user_id not in self.user_to_index:
-            return []
-        import numpy as np
-        u_idx = self.user_to_index[user_id]
-        scores = self.model.score(u_idx)  # вектор скоров для каждого item
-        scores = np.array(scores)
-
-        # Убираем items, которые юзер видел
-        seen = self.train_items_by_user[user_id]
-        for it in seen:
-            if it in self.item_to_index:
-                idx = self.item_to_index[it]
-                scores[idx] = -np.inf
-
-        top_indices = np.argpartition(scores, -top_n)[-top_n:]
-        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-        top_items = [self.item_ids[i] for i in top_indices]
-        return top_items
-
-
-    def evaluate(self, test_data, k=10, rating_threshold=2.5):
         """
-        Считаем Precision@K, Recall@K, NDCG@K на test_data.
-        Предполагается, что test_data = [(user, item, rating), ...].
+        Обучение выбранной модели.
+        Здесь можно добавить этап пред-фильтрации, если требуется.
         """
-        import numpy as np
-        true_items_by_user = defaultdict(set)
-        for u, i, r in test_data:
-            if r >= rating_threshold:
-                true_items_by_user[u].add(i)
+        if self.model is None:
+            logger.error("Модель не инициализирована.")
+            raise ValueError("Модель не инициализирована.")
+        logger.info("Начало этапа обучения модели.")
+        # Пример пред-фильтрации можно добавить здесь:
+        # self.dataset = self.pre_filter(self.dataset)
+        self.model.fit()
+        logger.info("Обучение модели завершено.")
 
-        prec_list, rec_list, ndcg_list = [], [], []
+    def predict(self, default_context: dict = None):
+        """
+        Генерация ранжированных рекомендаций для каждого пользователя.
+        В метод predict() для моделей, где используется контекст (например, CAMF),
+        можно задать default_context – словарь с значениями контекстных признаков по умолчанию.
 
-        for user, relevant_items in true_items_by_user.items():
-            if user not in self.user_to_index:
-                continue
-            top_k = self.recommend(user, top_n=k)
-            hits = sum(1 for it in top_k if it in relevant_items)
+        :param default_context: словарь вида {context_col: значение}
+        :return: словарь, где ключ — идентификатор пользователя, а значение — список отранжированных объектов.
+        """
+        if self.model is None:
+            logger.error("Модель не инициализирована.")
+            raise ValueError("Модель не инициализирована.")
+        logger.info("Начало предсказания рекомендаций.")
+        recs = self.model.predict(default_context)
+        # Пример пост-фильтрации можно добавитья здесь:
+        # recs = self.post_filter(recs)
+        logger.info("Предсказание рекомендаций завершено.")
+        return recs
 
-            prec = hits / k
-            rec = hits / len(relevant_items)
-            prec_list.append(prec)
-            rec_list.append(rec)
+    def pre_filter(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        """
+        Пример пред-фильтрации: можно убрать объекты по сезонным или другим условиям.
+        """
+        # Здесь можно реализовать логику пред-фильтрации.
+        return dataset
 
-            # NDCG
-            dcg, idcg = 0.0, 0.0
-            for rank, it in enumerate(top_k, start=1):
-                rel = 1.0 if it in relevant_items else 0.0
-                dcg += rel / np.log2(rank + 1)
-            # Ideal DCG
-            sorted_relevances = [1.0]*len(relevant_items) + [0.0]*(k - len(relevant_items))
-            for rank, rel in enumerate(sorted_relevances[:k], start=1):
-                idcg += rel / np.log2(rank + 1)
-            ndcg = dcg/idcg if idcg > 0 else 0.0
-            ndcg_list.append(ndcg)
+    def post_filter(self, recommendations: dict) -> dict:
+        """
+        Пример пост-фильтрации: можно до финального вывода дополнительно отфильтровать рекомендации.
+        """
+        # Здесь можно реализовать логику пост-фильтрации.
+        return recommendations
 
-        p = np.mean(prec_list) if prec_list else 0.0
-        r = np.mean(rec_list) if rec_list else 0.0
-        n = np.mean(ndcg_list) if ndcg_list else 0.0
-        return p, r, n
+
+# Реализация модели CAMF с использованием SGD
+class CAMFModel:
+    def __init__(self, dataset: pd.DataFrame, user_col: str, item_col: str,
+                 rating_col: str, context_cols: list, **params):
+        self.logger = logging.getLogger("CAMFModel")
+        self.dataset = dataset
+        self.user_col = user_col
+        self.item_col = item_col
+        self.rating_col = rating_col
+        self.context_cols = context_cols
+        # Гиперпараметры модели:
+        self.n_factors = params.get('n_factors', 10)
+        self.learning_rate = params.get('learning_rate', 0.005)
+        self.reg = params.get('reg', 0.02)
+        self.epochs = params.get('epochs', 10)
+
+        # Инициализация параметров:
+        self.users = self.dataset[self.user_col].unique()
+        self.items = self.dataset[self.item_col].unique()
+
+        # Латентные векторы пользователей и объектов
+        self.U = {u: np.random.normal(scale=0.1, size=self.n_factors) for u in self.users}
+        self.V = {i: np.random.normal(scale=0.1, size=self.n_factors) for i in self.items}
+        # Смещения пользователей и объектов
+        self.b_u = {u: 0.0 for u in self.users}
+        self.b_i = {i: 0.0 for i in self.items}
+        # Контекстные смещения: для каждого контекстного столбца и его уникального значения
+        self.b_context = {}
+        for col in self.context_cols:
+            unique_vals = self.dataset[col].unique()
+            for val in unique_vals:
+                self.b_context[(col, val)] = 0.0
+        # Глобальный средний рейтинг
+        self.global_bias = self.dataset[self.rating_col].mean()
+        self.logger.info("Инициализация CAMF модели завершена. Глобальный bias: %.4f", self.global_bias)
+
+    def fit(self):
+        """
+        Обучение CAMF через SGD.
+        Обходим все записи обучающей выборки и обновляем параметры модели.
+        """
+        self.logger.info("Начало обучения CAMF модели.")
+        data = self.dataset.sample(frac=1).reset_index(drop=True)  # перемешиваем данные
+        for epoch in range(1, self.epochs + 1):
+            total_loss = 0.0
+            data = data.sample(frac=1).reset_index(drop=True)
+            for idx, row in data.iterrows():
+                user = row[self.user_col]
+                item = row[self.item_col]
+                rating = row[self.rating_col]
+                # Сумма контекстных смещений для данной записи
+                context_bias = sum(self.b_context.get((col, row[col]), 0.0) for col in self.context_cols)
+                # Предсказание
+                pred = self.global_bias + self.b_u[user] + self.b_i[item] + np.dot(self.U[user],
+                                                                                   self.V[item]) + context_bias
+                err = rating - pred
+                total_loss += err ** 2
+
+                # Обновление латентных векторов
+                U_old = self.U[user].copy()
+                self.U[user] += self.learning_rate * (err * self.V[item] - self.reg * self.U[user])
+                self.V[item] += self.learning_rate * (err * U_old - self.reg * self.V[item])
+
+                # Обновление смещений
+                self.b_u[user] += self.learning_rate * (err - self.reg * self.b_u[user])
+                self.b_i[item] += self.learning_rate * (err - self.reg * self.b_i[item])
+                # Обновление контекстных смещений
+                for col in self.context_cols:
+                    key = (col, row[col])
+                    self.b_context[key] += self.learning_rate * (err - self.reg * self.b_context[key])
+            rmse = np.sqrt(total_loss / len(data))
+            self.logger.info("Эпоха %d/%d: RMSE = %.4f", epoch, self.epochs, rmse)
+        self.logger.info("Обучение CAMF модели завершено.")
+
+    def predict_score(self, user, item, context_dict: dict = None):
+        """
+        Расчёт предсказанного рейтинга для пользователя и объекта.
+        :param user: идентификатор пользователя.
+        :param item: идентификатор объекта.
+        :param context_dict: словарь с контекстными признаками по умолчанию (например, {'gender': 'M', 'age': 25})
+        :return: предсказанный рейтинг.
+        """
+        context_bias = 0.0
+        if context_dict is not None:
+            for col in self.context_cols:
+                val = context_dict.get(col, None)
+                if val is not None:
+                    context_bias += self.b_context.get((col, val), 0.0)
+        return self.global_bias + self.b_u[user] + self.b_i[item] + np.dot(self.U[user], self.V[item]) + context_bias
+
+    def predict(self, default_context: dict = None):
+        """
+        Для каждого пользователя рассчитываем предсказанные рейтинги для объектов,
+        с которыми он ещё не взаимодействовал, и возвращаем ранжированный список.
+        :param default_context: словарь с контекстом, который используется для предсказания.
+        :return: словарь {user: [item1, item2, ...]}.
+        """
+        self.logger.info("Начало генерации рекомендаций (CAMF).")
+        recommendations = {}
+        user_items = self.dataset.groupby(self.user_col)[self.item_col].apply(set).to_dict()
+        for user in self.users:
+            scores = {}
+            for item in self.items:
+                if item in user_items.get(user, set()):
+                    continue
+                score = self.predict_score(user, item, default_context)
+                scores[item] = score
+            ranked_items = sorted(scores, key=scores.get, reverse=True)
+            recommendations[user] = ranked_items
+        self.logger.info("Генерация рекомендаций (CAMF) завершена.")
+        return recommendations
+
+
+# Реализация модели CSLIM (Item-based Collaborative Filtering с косинусной схожестью)
+class CSLIMModel:
+    def __init__(self, dataset: pd.DataFrame, user_col: str, item_col: str,
+                 rating_col: str, context_cols: list, **params):
+        self.logger = logging.getLogger("CSLIMModel")
+        self.dataset = dataset
+        self.user_col = user_col
+        self.item_col = item_col
+        self.rating_col = rating_col
+        self.context_cols = context_cols  # в данной реализации не используются, но могут быть задействованы для дообучения
+        self.use_ratings = params.get('use_ratings', True)
+        self.item_similarity = None
+        self.user_item_matrix = None
+
+    def fit(self):
+        """
+        Формируем матрицу взаимодействий и вычисляем косинусную схожесть между объектами.
+        """
+        self.logger.info("Формирование матрицы 'пользователь-объект' для CSLIM")
+        self.user_item_matrix = self.dataset.pivot_table(index=self.user_col,
+                                                         columns=self.item_col,
+                                                         values=self.rating_col,
+                                                         fill_value=0)
+        R = self.user_item_matrix.values.astype(np.float32)
+        norms = norm(R, axis=0)
+        norms[norms == 0] = 1e-10
+        similarity_matrix = np.dot(R.T, R) / (np.outer(norms, norms))
+        items = self.user_item_matrix.columns
+        self.item_similarity = {}
+        for i, item_i in enumerate(items):
+            sim_dict = {}
+            for j, item_j in enumerate(items):
+                if item_i == item_j:
+                    continue
+                sim_dict[item_j] = similarity_matrix[i, j]
+            self.item_similarity[item_i] = sim_dict
+        self.logger.info("Вычисление схожести объектов завершено.")
+
+    def predict(self, default_context: dict = None):
+        """
+        Для каждого пользователя рассчитываем сумму взвешенных оценок по схожести для объектов,
+        с которыми он ещё не взаимодействовал, и возвращаем ранжированный список.
+        :param default_context: в данной реализации не используется.
+        :return: словарь {user: [item1, item2, ...]}.
+        """
+        self.logger.info("Начало генерации рекомендаций (CSLIM).")
+        recommendations = {}
+        user_groups = self.dataset.groupby(self.user_col)
+        for user, group in user_groups:
+            interacted = group.set_index(self.item_col)[self.rating_col].to_dict()
+            scores = defaultdict(float)
+            for item_i, rating in interacted.items():
+                for item_j, sim in self.item_similarity.get(item_i, {}).items():
+                    if item_j in interacted:
+                        continue
+                    scores[item_j] += sim * rating
+            ranked_items = sorted(scores, key=scores.get, reverse=True)
+            recommendations[user] = ranked_items
+        self.logger.info("Генерация рекомендаций (CSLIM) завершена.")
+        return recommendations
+
+
+# Пример использования:
+if __name__ == "__main__":
+    # Пример датасета с контекстными признаками
+    data = {
+        'user_id': ['u1', 'u1', 'u2', 'u2', 'u3', 'u3', 'u4'],
+        'item_id': ['i1', 'i2', 'i2', 'i3', 'i1', 'i3', 'i2'],
+        'rating': [5, 3, 4, 2, 1, 5, 4],
+        'gender': ['M', 'M', 'F', 'F', 'M', 'M', 'F'],  # контекст: пол
+        'age': [25, 25, 30, 30, 22, 22, 28]  # контекст: возраст
+    }
+    df = pd.DataFrame(data)
+
+    logger.info("=== Запуск CAMF модели ===")
+    camf_recommender = UniversalContextualRecommender(df, model_name='camf',
+                                                      user_col='user_id', item_col='item_id',
+                                                      rating_col='rating',
+                                                      context_cols=['gender', 'age'],
+                                                      n_factors=5, learning_rate=0.01, reg=0.02, epochs=15)
+    camf_recommender.fit()
+    default_context = {'gender': 'M', 'age': 25}
+    camf_recs = camf_recommender.predict(default_context=default_context)
+    logger.info("Рекомендации (CAMF) для пользователей:")
+    for user, items in camf_recs.items():
+        logger.info("Пользователь %s: %s", user, items)
+
+    logger.info("=== Запуск CSLIM модели ===")
+    cslim_recommender = UniversalContextualRecommender(df, model_name='cslim',
+                                                       user_col='user_id', item_col='item_id',
+                                                       rating_col='rating', context_cols=['gender', 'age'],
+                                                       use_ratings=True)
+    cslim_recommender.fit()
+    cslim_recs = cslim_recommender.predict()
+    logger.info("Рекомендации (CSLIM) для пользователей:")
+    for user, items in cslim_recs.items():
+        logger.info("Пользователь %s: %s", user, items)
