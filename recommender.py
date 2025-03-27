@@ -165,8 +165,4 @@ class UniversalContextualRecommender:
         logger.info("Генерация рекомендаций завершена.")
         return recs
 
-    def pre_filter(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        return dataset
 
-    def post_filter(self, recommendations: dict) -> dict:
-        return recommendations
