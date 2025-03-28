@@ -1,12 +1,9 @@
 import os
 import pandas as pd
 import logging
+from sklearn.model_selection import train_test_split
 
 from recommender import UniversalContextualRecommender
-
-# Предполагается, что класс UniversalContextualRecommender уже реализован.
-# Например, если он находится в модуле my_recommender, импортируйте его:
-
 
 # Настройка логирования
 logging.basicConfig(
@@ -36,7 +33,6 @@ def load_data(directory: str):
     df_hours = pd.read_csv(files["chefmozhours4"])
     df_parking = pd.read_csv(files["chefmozparking"])
 
-    # Для geoplaces2 задаем явную кодировку
     try:
         df_geoplaces = pd.read_csv(files["geoplaces2"], encoding="utf-8")
     except UnicodeDecodeError:
@@ -66,14 +62,13 @@ def load_data(directory: str):
 def merge_data(directory: str) -> pd.DataFrame:
     """
     Объединяет данные:
-      - Используется rating_final.csv как базовая таблица (User-Item-Rating).
+      - rating_final.csv используется как базовая таблица (User-Item-Rating).
       - По ключу placeID объединяются файлы с данными по ресторанам.
       - По ключу userID объединяются файлы с данными по потребителям.
     """
     (df_accepts, df_cuisine, df_hours, df_parking,
      df_geoplaces, df_rating, df_usercuisine, df_userpayment, df_userprofile) = load_data(directory)
 
-    # Объединяем ресторанную информацию
     df = df_rating.copy()
     df = df.merge(df_geoplaces, on="placeID", how="left")
     df = df.merge(df_cuisine, on="placeID", how="left")
@@ -81,7 +76,6 @@ def merge_data(directory: str) -> pd.DataFrame:
     df = df.merge(df_parking, on="placeID", how="left")
     df = df.merge(df_accepts, on="placeID", how="left")
 
-    # Объединяем информацию о потребителях
     df = df.merge(df_userprofile, on="userID", how="left")
     df = df.merge(df_usercuisine, on="userID", how="left")
     df = df.merge(df_userpayment, on="userID", how="left")
@@ -106,13 +100,39 @@ def save_recommendations_to_csv(recommendations: dict, output_file: str):
     logger.info("Результаты сохранены в %s", output_file)
 
 
-def main():
-    # Задайте путь к директории с данными
+def create_and_save_ground_truth(df: pd.DataFrame, test_ratio: float = 0.3, random_state: int = 42):
+    """
+    Разбивает объединённый датасет на тренировочную и тестовую выборки,
+    затем для тестовой выборки агрегирует true placeID для каждого пользователя
+    и сохраняет результат в CSV (test_ground_truth.csv).
+    """
+    from sklearn.model_selection import train_test_split
+    train_df, test_df = train_test_split(df, test_size=test_ratio, random_state=random_state)
+    ground_truth_df = test_df.groupby("userID")["placeID"].apply(lambda x: ",".join(map(str, x))).reset_index()
+    ground_truth_df.rename(columns={"placeID": "true_items"}, inplace=True)
+    ground_truth_csv = "test_ground_truth_restaurant.csv"
+    ground_truth_df.to_csv(ground_truth_csv, index=False)
+    logger.info("Ground truth (тестовая выборка) сохранена в %s", ground_truth_csv)
+    return train_df, test_df
+
+
+def main(tested: bool = False):
+    """
+    Если tested=True, датасет разбивается на тренировочную и тестовую выборки (и ground truth сохраняется),
+    и модели обучаются только на тренировочных данных.
+    Если tested=False, модели обучаются на всём датасете.
+    """
     data_directory = "restaurant+consumer+data"
     df = merge_data(data_directory)
 
-    # Определяем контекстные признаки: исключаем ключевые колонки, отвечающие за идентификаторы и основную оценку.
-    # Здесь используем userID, placeID и rating (а также food_rating, service_rating если есть) как основные.
+    if tested:
+        logger.info("Включён режим тестирования. Будет выполнено разбиение на train/test и сохранение ground truth.")
+        train_df, test_df = create_and_save_ground_truth(df, test_ratio=0.3, random_state=42)
+        training_data = train_df
+    else:
+        logger.info("Режим тестирования выключен. Модели обучаются на всём датасете.")
+        training_data = df
+
     exclude_cols = ['userID', 'placeID', 'rating', 'food_rating', 'service_rating']
     context_cols = [col for col in df.columns if col not in exclude_cols]
     logger.info("Контекстные признаки: %s", context_cols)
@@ -120,11 +140,11 @@ def main():
     # ------------------- CAMF модель -------------------
     logger.info("Запуск CAMF модели")
     recommender_camf = UniversalContextualRecommender(
-        dataset=df,
+        dataset=training_data,
         model_name='camf',
-        user_col='userID',  # идентификатор пользователя
-        item_col='placeID',  # идентификатор ресторана
-        rating_col='rating',  # основная оценка
+        user_col='userID',
+        item_col='placeID',
+        rating_col='rating',
         context_cols=context_cols,
         n_factors=10,
         learning_rate=0.01,
@@ -138,21 +158,22 @@ def main():
     # ------------------- CSLIM модель -------------------
     logger.info("Запуск CSLIM модели")
     recommender_cslim = UniversalContextualRecommender(
-        dataset=df,
+        dataset=training_data,
         model_name='cslim',
         user_col='userID',
         item_col='placeID',
         rating_col='rating',
-        context_cols=context_cols,  # для CSLIM контекстные признаки не используются, но передаются для согласованности
+        context_cols=context_cols,
         use_ratings=True
     )
     recommender_cslim.fit()
     cslim_recs = recommender_cslim.predict(default_context=None)
     save_recommendations_to_csv(cslim_recs, "cslim_restaurant_recommendations.csv")
- # ------------------- Модель LightFM -------------------
+
+    # ------------------- Модель LightFM -------------------
     logger.info("Запуск модели LightFM")
     recommender_lightfm = UniversalContextualRecommender(
-        dataset=df,
+        dataset=training_data,
         model_name='lightfm',
         user_col='userID',
         item_col='placeID',
@@ -165,12 +186,10 @@ def main():
     lightfm_recs = recommender_lightfm.predict()
     save_recommendations_to_csv(lightfm_recs, "lightfm_restaurant_recommendations.csv")
 
-
-
     # ------------------- Модель Surprise SVD -------------------
     logger.info("Запуск модели Surprise SVD")
     recommender_surprise = UniversalContextualRecommender(
-        dataset=df,
+        dataset=training_data,
         model_name='surprise_svd',
         user_col='userID',
         item_col='placeID',
@@ -184,5 +203,8 @@ def main():
     surprise_recs = recommender_surprise.predict()
     save_recommendations_to_csv(surprise_recs, "surprise_svd_restaurant_recommendations.csv")
 
+
 if __name__ == '__main__':
-    main()
+    # Передайте tested=True, если хотите выполнить разбиение на train/test и обучение на тренировочных данных,
+    # иначе tested=False – обучение на всём датасете.
+    main(tested=True)

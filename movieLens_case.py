@@ -1,6 +1,9 @@
 import os
 import pandas as pd
+import numpy as np
+import random
 import logging
+from sklearn.model_selection import train_test_split
 
 from recommender import UniversalContextualRecommender
 
@@ -11,7 +14,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("MovieLensDataIntegration")
-
 
 def load_data(directory: str):
     files = {
@@ -26,17 +28,14 @@ def load_data(directory: str):
     df_ratings = pd.read_csv(files["ratings"], sep="\t", names=["userID", "movieID", "rating", "timestamp"])
 
     # Файл u.item: movieID, title, release_date, video_release_date, IMDb_URL и 19 бинарных признаков жанров
-    movie_columns = ["movieID", "title", "release_date", "video_release_date", "IMDb_URL"] + [f"genre_{i}" for i in
-                                                                                              range(19)]
+    movie_columns = ["movieID", "title", "release_date", "video_release_date", "IMDb_URL"] + [f"genre_{i}" for i in range(19)]
     df_movies = pd.read_csv(files["movies"], sep="|", names=movie_columns, encoding="latin1", header=None)
 
     # Файл u.user: userID, age, gender, occupation, zip_code (разделитель - |)
     df_users = pd.read_csv(files["users"], sep="|", names=["userID", "age", "gender", "occupation", "zip_code"])
 
-    logger.info("Файлы загружены: ratings: %s, movies: %s, users: %s", df_ratings.shape, df_movies.shape,
-                df_users.shape)
+    logger.info("Файлы загружены: ratings: %s, movies: %s, users: %s", df_ratings.shape, df_movies.shape, df_users.shape)
     return df_ratings, df_movies, df_users
-
 
 def merge_data(directory: str) -> pd.DataFrame:
     df_ratings, df_movies, df_users = load_data(directory)
@@ -48,7 +47,6 @@ def merge_data(directory: str) -> pd.DataFrame:
 
     logger.info("Объединённые данные имеют размер: %s", df.shape)
     return df
-
 
 def save_recommendations_to_csv(recommendations: dict, output_file: str):
     """
@@ -65,21 +63,40 @@ def save_recommendations_to_csv(recommendations: dict, output_file: str):
     recs_df.to_csv(output_file, index=False)
     logger.info("Результаты сохранены в %s", output_file)
 
+def create_and_save_ground_truth(df: pd.DataFrame, test_ratio: float = 0.3, random_state: int = 42):
+    """
+    Разбивает объединённый датасет на тренировочную и тестовую выборки,
+    затем для тестовой выборки агрегирует true movieID для каждого пользователя
+    и сохраняет результат в CSV (test_ground_truth_MovieLens.csv).
+    Если в данных отсутствует столбец 'placeID', используется 'movieID'.
+    """
+    train_df, test_df = train_test_split(df, test_size=test_ratio, random_state=random_state)
+    # Определяем столбец для идентификатора фильма
+    id_col = "placeID" if "placeID" in df.columns else "movieID"
+    ground_truth_df = test_df.groupby("userID")[id_col].apply(lambda x: ",".join(map(str, x))).reset_index()
+    ground_truth_df.rename(columns={id_col: "true_items"}, inplace=True)
+    ground_truth_csv = "test_ground_truth_MovieLens.csv"
+    ground_truth_df.to_csv(ground_truth_csv, index=False)
+    logger.info("Ground truth (тестовая выборка) сохранена в %s", ground_truth_csv)
+    return train_df, test_df
 
-def main():
-    # Путь к директории с данными MovieLens
-    data_directory = "ml-100k"  # В этой папке должны быть файлы: u.data, u.item, u.user
+def main(tested: bool):
+    data_directory = "ml-100k"
     df = merge_data(data_directory)
 
-    # Определяем контекстные признаки, исключая ключевые поля:
-    # идентификаторы (userID, movieID), основной рейтинг, временные метки и базовую информацию о фильмах
     exclude_cols = [
         'userID', 'movieID', 'rating', 'timestamp',
         'title', 'release_date', 'video_release_date', 'IMDb_URL'
     ]
-    # Остальные столбцы считаются контекстными (например, признаки жанров и демографические данные пользователей)
+
     context_cols = [col for col in df.columns if col not in exclude_cols]
     logger.info("Контекстные признаки: %s", context_cols)
+    if tested:
+        logger.info("Включён режим тестирования. Будет выполнено разбиение на train/test и сохранение ground truth.")
+        train_df, test_df = create_and_save_ground_truth(df, test_ratio=0.3, random_state=42)
+        df = train_df
+    else:
+        logger.info("Режим тестирования выключен. Модели обучаются на всём датасете.")
 
     # ------------------- CAMF модель -------------------
     logger.info("Запуск CAMF модели")
@@ -147,6 +164,7 @@ def main():
     surprise_recs = recommender_surprise.predict(default_context=None)
     save_recommendations_to_csv(surprise_recs, "surprise_svd_movielens_recommendations.csv")
 
-
 if __name__ == '__main__':
-    main()
+    # Передайте tested=True, если хотите выполнить разбиение на train/test и обучение на тренировочных данных,
+    # иначе tested=False – обучение на всём датасете.
+    main(tested=True)
