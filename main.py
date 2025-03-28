@@ -149,7 +149,40 @@ def main():
     recommender_cslim.fit()
     cslim_recs = recommender_cslim.predict(default_context=None)
     save_recommendations_to_csv(cslim_recs, "cslim_restaurant_recommendations.csv")
+ # ------------------- Модель LightFM -------------------
+    logger.info("Запуск модели LightFM")
+    recommender_lightfm = UniversalContextualRecommender(
+        dataset=df,
+        model_name='lightfm',
+        user_col='userID',
+        item_col='placeID',
+        rating_col='rating',
+        context_cols=context_cols,
+        epochs=10,
+        learning_rate=0.05
+    )
+    recommender_lightfm.fit()
+    lightfm_recs = recommender_lightfm.predict()
+    save_recommendations_to_csv(lightfm_recs, "lightfm_restaurant_recommendations.csv")
 
+
+
+    # ------------------- Модель Surprise SVD -------------------
+    logger.info("Запуск модели Surprise SVD")
+    recommender_surprise = UniversalContextualRecommender(
+        dataset=df,
+        model_name='surprise_svd',
+        user_col='userID',
+        item_col='placeID',
+        rating_col='rating',
+        context_cols=context_cols,
+        epochs=20,
+        lr_all=0.005,
+        reg_all=0.02
+    )
+    recommender_surprise.fit()
+    surprise_recs = recommender_surprise.predict()
+    save_recommendations_to_csv(surprise_recs, "surprise_svd_restaurant_recommendations.csv")
 
 if __name__ == '__main__':
     main()
